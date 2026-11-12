@@ -1,5 +1,4 @@
-<!doctype html><html><head><meta charset=utf8><meta name=viewport content="width=device-width,initial-scale=1,viewport-fit=cover"><style>:root{color-scheme:light;box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}html{scroll-padding-top:env(safe-area-inset-top,0px)}body{margin:0;padding:0;font:14px -apple-system,BlinkMacSystemFont,sans-serif;background:#fff;color:#000}img{max-width:100%}[hidden]:not([hidden=until-found i]){display:none!important}</style></head><body>
-<title>Nozzle Align</title>
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><style>body{margin:0}[hidden]{display:none!important}</style></head><body><title>Nozzle Align</title>
 <meta name="claude:viewport-fit-sides" content="cover">
 <style>
 /* Layout: one narrow column for a phone held over a print; photo first, answer directly under it. */
@@ -75,7 +74,11 @@ ol.tips { margin: 0; padding-left: 20px; font-size: 14px; display: flex; flex-di
 </style>
 
 <style>
-video { display: block; width: 100%; max-height: 62vh; background: #000; border-radius: 8px; }
+#liveWrap { display: flex; justify-content: center; background: #000; border-radius: 8px; overflow: hidden; }
+#liveView { display: block; max-width: 100%; }
+#livePanel { display: flex; flex-direction: column; gap: 10px; }
+#liveControls { display: flex; flex-direction: column; gap: 10px; }
+#zoom { flex: 1 1 140px; min-width: 0; height: 44px; accent-color: var(--accent); }
 #liveMsg { font-weight: 600; }
 td input[type="text"] { padding: 6px 6px; width: 9ch; min-width: 0; font: 600 14px var(--mono); }
 #rowsTbl th, #rowsTbl td { padding-inline: 4px; }
@@ -97,9 +100,19 @@ tr.skip td { color: var(--muted); }
       <button id="liveBtn" type="button">Auto capture</button>
     </div>
     <div id="livePanel" hidden>
-      <video id="video" playsinline muted></video>
-      <p id="liveMsg" class="hint">Starting camera…</p>
-      <div class="row"><button id="liveStop" type="button">Stop camera</button></div>
+      <video id="video" playsinline muted hidden></video>
+      <div id="liveWrap"><canvas id="liveView" width="300" height="200" aria-label="Live camera view with the rows that have been found"></canvas></div>
+      <p id="liveMsg" class="hint" aria-live="polite">Starting camera…</p>
+      <div id="liveControls" hidden>
+        <div class="row" id="zoomRow"><label for="zoom" class="hint">Zoom</label><input id="zoom" type="range" min="1" max="4" step="0.1" value="1"><output id="zoomVal" class="hint">1.0×</output></div>
+        <div class="row">
+          <button id="liveSnap" type="button" class="primary">Take it now</button>
+          <button id="torch" type="button" hidden>Torch on</button>
+          <button id="nextCam" type="button" hidden>Next lens</button>
+          <button id="liveStop" type="button">Stop camera</button>
+        </div>
+        <p class="hint">Dashed white frame: keep the rows inside it. Green box: row is ready. Orange: too small or blurred. Grey dashed: cut off. Standing back and zooming in keeps the phone's shadow off the row.</p>
+      </div>
     </div>
     <label class="field" style="flex:none">Lighting
       <select id="light">
@@ -738,6 +751,44 @@ const NA = (function () {
     for (let i = 0; i < n; i++) o[n - 1 - i] = g[i];
     return { g: o, w, h };
   }
+  // Evens out the lighting: estimates how bright bare paper is at every point (so a shadow edge stays sharp
+  // while bars and blocks are bridged over) and rescales the picture so paper is the same brightness everywhere.
+  function flatten(g, w, h) {
+    const long = Math.max(w, h), t = Math.max(4, Math.round(long / 200)), tw = Math.ceil(w / t), th = Math.ceil(h / t);
+    let m = new Float32Array(tw * th);
+    const buf = [];
+    for (let ty = 0; ty < th; ty++) for (let tx = 0; tx < tw; tx++) {
+      buf.length = 0;
+      const y1 = Math.min(h, (ty + 1) * t), x1 = Math.min(w, (tx + 1) * t);
+      for (let y = ty * t; y < y1; y += 2) for (let x = tx * t; x < x1; x += 2) buf.push(g[y * w + x]);
+      buf.sort((a, b) => a - b);
+      m[ty * tw + tx] = buf[Math.floor(buf.length * 0.85)];
+    }
+    const r = Math.max(2, Math.round(long / 28 / t));
+    const pass = (src, pick, horiz) => {
+      const o = new Float32Array(tw * th);
+      for (let y = 0; y < th; y++) for (let x = 0; x < tw; x++) {
+        let v = src[y * tw + x];
+        if (horiz) { for (let d = -r; d <= r; d++) { const xx = x + d; if (xx >= 0 && xx < tw) v = pick(v, src[y * tw + xx]); } }
+        else { for (let d = -r; d <= r; d++) { const yy = y + d; if (yy >= 0 && yy < th) v = pick(v, src[yy * tw + x]); } }
+        o[y * tw + x] = v;
+      }
+      return o;
+    };
+    m = pass(pass(m, Math.max, true), Math.max, false);   // bridge over ink
+    m = pass(pass(m, Math.min, true), Math.min, false);   // put shadow edges back where they were
+    const o = new Float32Array(w * h);
+    for (let y = 0; y < h; y++) {
+      const fy = Math.min(th - 1, Math.max(0, (y + 0.5) / t - 0.5)), y0 = Math.floor(fy), y1 = Math.min(th - 1, y0 + 1), ay = fy - y0;
+      for (let x = 0; x < w; x++) {
+        const fx = Math.min(tw - 1, Math.max(0, (x + 0.5) / t - 0.5)), x0 = Math.floor(fx), x1 = Math.min(tw - 1, x0 + 1), ax = fx - x0;
+        const p = (m[y0 * tw + x0] * (1 - ax) + m[y0 * tw + x1] * ax) * (1 - ay) + (m[y1 * tw + x0] * (1 - ax) + m[y1 * tw + x1] * ax) * ay;
+        const v = (g[y * w + x] / Math.max(p, 12)) * 215;
+        o[y * w + x] = v > 255 ? 255 : v;
+      }
+    }
+    return o;
+  }
   // horizontal bands that are mostly covered by ink: candidate rows of patterns
   function findBands(g, w, h) {
     const sh = Math.max(6, Math.round(h / 180)), dx = 4, wn = Math.floor(w / dx), R = Math.max(6, Math.round(wn / 9));
@@ -807,6 +858,7 @@ const NA = (function () {
   // Finds which way up the photo is and every row of patterns in it.
   // rot = quarter turns clockwise that make the photo upright.
   function scan(g, w, h) {
+    g = flatten(g, w, h);
     const score = (rows) => rows.reduce((s, r) => s + (r.valid ? r.a.blocks.length : 0), 0);
     let cur = { g, w, h }, rot = 0;
     let rows = scanOriented(g, w, h);
@@ -829,7 +881,7 @@ const NA = (function () {
     }
     return { rot: rot % 4, g: cur.g, w: cur.w, h: cur.h, rows };
   }
-  return { analyze, fit, estimate, scan, rot90, rot180, findBands, segmentName, readName, readGlyphs, setGlyphs: (o) => { GLYPHS = o; }, GW, GH };
+  return { analyze, fit, estimate, scan, flatten, rot90, rot180, findBands, segmentName, readName, readGlyphs, setGlyphs: (o) => { GLYPHS = o; }, GW, GH };
 })();
 
 </script>
@@ -1046,7 +1098,7 @@ const NA = (function () {
     const w = Math.min(work.width - x, Math.round(box.w)), h = Math.min(work.height - y, Math.round(box.h));
     if (w < 60 || h < 40) return showDetail(true);
     ov = { x, y };
-    try { res = NA.analyze(grayOf(work, x, y, w, h), w, h); }
+    try { res = NA.analyze(NA.flatten(grayOf(work, x, y, w, h), w, h), w, h); }
     catch (e) { res = { ok: false, error: "Measuring failed on this photo (" + e.message + "). Retake it or move the box.", warn: [] }; }
     if (res.ok && res.blocks.length !== lastN) {
       lastN = res.blocks.length;
@@ -1288,68 +1340,162 @@ const NA = (function () {
   });
 
   // ---------- auto capture from the live camera
-  let stream = null, liveTimer = null, steady = 0, lastBoxes = "";
-  const small = document.createElement("canvas");
+  let stream = null, liveTimer = null, rafId = 0, steady = 0, lastBoxes = "", liveRows = [], liveDim = null, camIds = [], camAt = 0, busy = false;
+  const small = document.createElement("canvas"), lv = $("liveView"), lctx = lv.getContext("2d");
+  const STEADY_NEEDED = 2;
   function stopLive() {
     if (liveTimer) { clearInterval(liveTimer); liveTimer = null; }
+    if (rafId) { cancelAnimationFrame(rafId); rafId = 0; }
     if (stream) { stream.getTracks().forEach((t) => t.stop()); stream = null; }
-    $("livePanel").hidden = true;
+    $("livePanel").hidden = true; liveRows = [];
+  }
+  // box in the turned-upright picture -> box in the camera frame
+  function unturn(b, rotN, w0, h0) {
+    let pts = [[b.x, b.y], [b.x + b.w, b.y + b.h]], w = rotN % 2 ? h0 : w0, h = rotN % 2 ? w0 : h0;
+    for (let i = 0; i < (4 - rotN) % 4; i++) { pts = pts.map(([x, y]) => [h - y, x]); const t = w; w = h; h = t; }
+    const xs = pts.map((p) => p[0]), ys = pts.map((p) => p[1]);
+    return { x: Math.min(...xs), y: Math.min(...ys), w: Math.abs(xs[1] - xs[0]), h: Math.abs(ys[1] - ys[0]) };
+  }
+  function paintLive() {
+    rafId = requestAnimationFrame(paintLive);
+    const v = $("video");
+    if (!stream || !v.videoWidth) return;
+    const cw = $("livePanel").clientWidth || 320, maxH = Math.max(240, window.innerHeight * 0.62);
+    const sc = Math.min(cw / v.videoWidth, maxH / v.videoHeight), dpr = Math.min(window.devicePixelRatio || 1, 2);
+    const W = Math.round(v.videoWidth * sc * dpr), H = Math.round(v.videoHeight * sc * dpr);
+    if (lv.width !== W || lv.height !== H) { lv.width = W; lv.height = H; lv.style.width = Math.round(W / dpr) + "px"; lv.style.height = Math.round(H / dpr) + "px"; }
+    lctx.drawImage(v, 0, 0, W, H);
+    // target frame: keep the rows inside it
+    const m = Math.round(Math.min(W, H) * 0.05);
+    lctx.lineWidth = 2 * dpr; lctx.strokeStyle = "rgba(255,255,255,0.9)"; lctx.setLineDash([10 * dpr, 8 * dpr]);
+    lctx.strokeRect(m, m, W - 2 * m, H - 2 * m); lctx.setLineDash([]);
+    if (!liveDim) return;
+    const k = W / liveDim.w;
+    for (const r of liveRows) {
+      lctx.lineWidth = 3 * dpr;
+      lctx.strokeStyle = r.state === "ok" ? "#2fd27a" : r.state === "cut" ? "rgba(200,200,200,0.95)" : "#ffb020";
+      if (r.state === "cut") lctx.setLineDash([6 * dpr, 5 * dpr]);
+      lctx.strokeRect(r.b.x * k, r.b.y * k, r.b.w * k, r.b.h * k); lctx.setLineDash([]);
+      if (r.label) {
+        lctx.font = "700 " + 13 * dpr + "px system-ui, sans-serif"; lctx.textBaseline = "top";
+        const tw = lctx.measureText(r.label).width + 8 * dpr;
+        lctx.fillStyle = "rgba(0,0,0,0.7)"; lctx.fillRect(r.b.x * k, r.b.y * k, tw, 18 * dpr);
+        lctx.fillStyle = "#ffffff"; lctx.fillText(r.label, r.b.x * k + 4 * dpr, r.b.y * k + 3 * dpr);
+      }
+    }
   }
   async function snap() {
+    if (busy || !stream) return;
+    busy = true;
+    if (liveTimer) { clearInterval(liveTimer); liveTimer = null; }
+    $("liveMsg").textContent = "Captured. Measuring…";
     const track = stream.getVideoTracks()[0];
     let url = null;
-    try {
-      if (window.ImageCapture) { const blob = await new ImageCapture(track).takePhoto(); url = URL.createObjectURL(blob); }
-    } catch (e) { url = null; }
+    try { if (window.ImageCapture) url = URL.createObjectURL(await new ImageCapture(track).takePhoto()); } catch (e) { url = null; }
     if (!url) {
       const v = $("video"), c = document.createElement("canvas");
       c.width = v.videoWidth; c.height = v.videoHeight;
       c.getContext("2d").drawImage(v, 0, 0);
       url = c.toDataURL("image/jpeg", 0.95);
     }
-    stopLive();
+    stopLive(); busy = false;
     loadImage(url, false);
   }
   function liveTick() {
     const v = $("video"), msg = $("liveMsg");
-    if (!stream || !v.videoWidth) return;
+    if (!stream || !v.videoWidth || busy) return;
     const k = 960 / Math.max(v.videoWidth, v.videoHeight);
     small.width = Math.round(v.videoWidth * k); small.height = Math.round(v.videoHeight * k);
     small.getContext("2d", { willReadFrequently: true }).drawImage(v, 0, 0, small.width, small.height);
     let sc;
     try { sc = NA.scan(grayOf(small, 0, 0, small.width, small.height), small.width, small.height); } catch (e) { sc = null; }
-    const full = sc ? sc.rows.filter((r) => r.complete) : [];
-    if (!full.length) { steady = 0; lastBoxes = ""; msg.textContent = sc && sc.rows.length ? "Row is cut off. Fit the whole row and its head name in the frame." : "Looking for the chart…"; return; }
-    const long = Math.max(sc.w, sc.h), widest = Math.max(...full.map((r) => r.box.w));
-    if (widest < 0.55 * long) { steady = 0; msg.textContent = "Move closer: the row should fill most of the frame."; return; }
-    if (full.some((r) => r.a.blur > 0.4)) { steady = 0; msg.textContent = "Out of focus. Hold still, or move back a little."; return; }
-    const sig = full.map((r) => Math.round(r.box.x / 12) + "," + Math.round(r.box.y / 12)).join(";");
+    liveDim = { w: small.width, h: small.height };
+    const long = Math.max(small.width, small.height);
+    liveRows = (sc ? sc.rows : []).map((r) => {
+      const st = !r.complete ? "cut" : r.box.w < 0.55 * long ? "small" : r.a.blur > 0.4 ? "blur" : "ok";
+      return { b: unturn(r.box, sc.rot, small.width, small.height), state: st,
+        label: st === "cut" ? "cut off" : st === "small" ? "too small" : st === "blur" ? "blurred" : (r.name && r.name.text) || "ready" };
+    });
+    const full = liveRows.filter((r) => r.state !== "cut"), ok = liveRows.filter((r) => r.state === "ok");
+    const reset = (t) => { steady = 0; lastBoxes = ""; msg.textContent = t; };
+    if (!liveRows.length) return reset("No chart found yet. Point the camera at one or two rows.");
+    if (!full.length) return reset("The row is cut off. Fit the whole row and its head name inside the dashed frame.");
+    if (!ok.length) return reset(full.some((r) => r.state === "small") ? "Too small. Move closer or zoom in until a row nearly fills the frame." : "Blurred. Hold still, or move back a little.");
+    const sig = ok.map((r) => Math.round(r.b.x / 14) + "," + Math.round(r.b.y / 14)).join(";");
     steady = sig === lastBoxes ? steady + 1 : 0; lastBoxes = sig;
-    if (steady < 2) { msg.textContent = "Good. Hold still…"; return; }
-    msg.textContent = "Captured."; clearInterval(liveTimer); liveTimer = null;
+    if (steady < STEADY_NEEDED) { msg.textContent = "Ready (" + ok.length + " row" + (ok.length > 1 ? "s" : "") + "). Hold still… " + "●".repeat(steady + 1) + "○".repeat(STEADY_NEEDED - steady); return; }
     snap();
   }
-  $("liveBtn").addEventListener("click", async () => {
-    const msg = $("liveMsg");
-    $("livePanel").hidden = false;
-    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) { msg.textContent = "This browser will not give the page a live camera. Use Take photo instead."; return; }
-    try {
-      stream = await navigator.mediaDevices.getUserMedia({ audio: false, video: { facingMode: { ideal: "environment" }, width: { ideal: 3840 }, height: { ideal: 2160 } } });
-    } catch (e) {
-      msg.textContent = "The live camera is not available here (" + (e.name || "blocked") + "). It needs this page opened from its own https address. Use Take photo instead.";
-      return;
-    }
+  function setupControls() {
+    const track = stream.getVideoTracks()[0];
+    let caps = {};
+    try { caps = track.getCapabilities ? track.getCapabilities() : {}; } catch (e) {}
+    const z = $("zoom"), zr = $("zoomRow");
+    if (caps.zoom && caps.zoom.max > caps.zoom.min) {
+      z.min = caps.zoom.min; z.max = Math.min(caps.zoom.max, 8); z.step = caps.zoom.step || 0.1;
+      const start = Math.min(2, +z.max);
+      z.value = start; $("zoomVal").textContent = (+z.value).toFixed(1) + "×";
+      track.applyConstraints({ advanced: [{ zoom: start }] }).catch(() => {});
+      zr.hidden = false;
+    } else zr.hidden = true;
+    const tb = $("torch");
+    tb.hidden = !caps.torch; tb.dataset.on = ""; tb.textContent = "Torch on";
+    $("nextCam").hidden = camIds.length < 2;
+  }
+  $("zoom").addEventListener("input", () => {
+    if (!stream) return;
+    const v = +$("zoom").value;
+    $("zoomVal").textContent = v.toFixed(1) + "×";
+    stream.getVideoTracks()[0].applyConstraints({ advanced: [{ zoom: v }] }).catch(() => {});
+  });
+  $("torch").addEventListener("click", () => {
+    if (!stream) return;
+    const tb = $("torch"), on = !tb.dataset.on;
+    stream.getVideoTracks()[0].applyConstraints({ advanced: [{ torch: on }] }).then(() => { tb.dataset.on = on ? "1" : ""; tb.textContent = on ? "Torch off" : "Torch on"; }).catch(() => { tb.hidden = true; });
+  });
+  async function openCamera(deviceId) {
+    if (stream) { stream.getTracks().forEach((t) => t.stop()); stream = null; }
+    const video = { width: { ideal: 3840 }, height: { ideal: 2160 } };
+    if (deviceId) video.deviceId = { exact: deviceId }; else video.facingMode = { ideal: "environment" };
+    stream = await navigator.mediaDevices.getUserMedia({ audio: false, video });
     const v = $("video");
     v.srcObject = stream;
     try { await v.play(); } catch (e) {}
-    msg.textContent = "Looking for the chart…"; steady = 0; lastBoxes = "";
-    liveTimer = setInterval(liveTick, 700);
+    try {
+      const devs = (await navigator.mediaDevices.enumerateDevices()).filter((d) => d.kind === "videoinput");
+      const back = devs.filter((d) => /back|rear|environment/i.test(d.label));
+      camIds = (back.length ? back : devs).map((d) => d.deviceId);
+      const cur = stream.getVideoTracks()[0].getSettings().deviceId;
+      camAt = Math.max(0, camIds.indexOf(cur));
+    } catch (e) { camIds = []; }
+    setupControls();
+  }
+  $("nextCam").addEventListener("click", async () => {
+    if (camIds.length < 2) return;
+    camAt = (camAt + 1) % camIds.length;
+    try { await openCamera(camIds[camAt]); $("liveMsg").textContent = "Switched lens (" + (camAt + 1) + " of " + camIds.length + ")."; }
+    catch (e) { $("liveMsg").textContent = "That lens could not be opened."; }
+  });
+  $("liveBtn").addEventListener("click", async () => {
+    const msg = $("liveMsg");
+    $("livePanel").hidden = false; $("liveControls").hidden = true;
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) { msg.textContent = "This browser will not give the page a live camera. Use Take photo instead."; return; }
+    try { await openCamera(null); }
+    catch (e) {
+      msg.textContent = "The live camera is not available here (" + (e.name || "blocked") + "). It needs this page opened from its own https address. Use Take photo instead.";
+      return;
+    }
+    $("liveControls").hidden = false;
+    msg.textContent = "No chart found yet. Point the camera at one or two rows."; steady = 0; lastBoxes = ""; liveRows = []; busy = false;
+    liveTimer = setInterval(liveTick, 600);
+    if (!rafId) paintLive();
+    $("livePanel").scrollIntoView({ block: "start", behavior: "smooth" });
   });
   $("liveStop").addEventListener("click", stopLive);
+  $("liveSnap").addEventListener("click", snap);
 
   renderLog(); setModeUi();
   loadImage(SAMPLE, true);
 })();
 </script>
-
 </body></html>
