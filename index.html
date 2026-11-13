@@ -76,6 +76,12 @@ ol.tips { margin: 0; padding-left: 20px; font-size: 14px; display: flex; flex-di
 <style>
 .zoombar button { min-height: 40px; padding: 6px 12px; }
 .zoombar #zIn, .zoombar #zOut { width: 44px; font-size: 20px; }
+.sheetbar { display: flex; flex-direction: column; gap: 2px; padding: 10px 12px; border-radius: 8px; background: var(--good-bg); color: var(--ink); }
+.sheetbar strong { font-size: 15px; }
+#logList td button { min-height: 36px; padding: 2px 10px; font-size: 14px; }
+#logList input[type="text"] { padding: 6px 6px; width: 9ch; min-width: 0; font: 600 14px var(--mono); }
+#logList input.own { width: 5ch; }
+#logList input.unsure { border-color: var(--fair); background: var(--fair-bg); }
 #liveWrap { display: flex; justify-content: center; background: #000; border-radius: 8px; overflow: hidden; }
 #liveView { display: block; max-width: 100%; }
 #livePanel { display: flex; flex-direction: column; gap: 10px; }
@@ -92,14 +98,18 @@ tr.skip td { color: var(--muted); }
 <main>
   <header>
     <h1>Nozzle Align</h1>
-    <p class="lede">Photograph the alignment chart. The page turns the photo the right way up, finds each row, reads the head name, and works out the number where the top and bottom heads line up.</p>
+    <p class="lede">Photograph the alignment chart row by row, from the top left down. Each photo is turned the right way up, every row in it is found and its head name read, and the number where the top and bottom heads line up goes straight into the list.</p>
   </header>
 
   <section class="panel" aria-label="Photo">
     <div class="row">
       <label class="filebtn primary">Take photo<input id="fileCam" type="file" accept="image/*" capture="environment"></label>
-      <label class="filebtn">Choose photo<input id="filePick" type="file" accept="image/*"></label>
+      <label class="filebtn">Choose photos<input id="filePick" type="file" accept="image/*" multiple></label>
       <button id="liveBtn" type="button">Auto capture</button>
+    </div>
+    <div id="sheetBar" class="sheetbar" hidden aria-live="polite">
+      <strong id="sheetCount"></strong>
+      <span id="sheetLast" class="hint"></span>
     </div>
     <div id="livePanel" hidden>
       <video id="video" playsinline muted hidden></video>
@@ -111,9 +121,9 @@ tr.skip td { color: var(--muted); }
           <button id="liveSnap" type="button" class="primary">Take it now</button>
           <button id="torch" type="button" hidden>Torch on</button>
           <button id="nextCam" type="button" hidden>Next lens</button>
-          <button id="liveStop" type="button">Stop camera</button>
+          <button id="liveStop" type="button">Done</button>
         </div>
-        <p class="hint">Dashed white frame: keep the rows inside it. Green box: row is ready. Orange: too small or blurred. Grey dashed: cut off. Standing back and zooming in keeps the phone's shadow off the row.</p>
+        <p class="hint">Work down the sheet from the top left. The camera stays on: each time it sees a row it has not got yet, it takes the photo by itself (the phone buzzes on Android), and you move on to the next. Green box: ready. Orange: too small or blurred. Grey dashed: cut off. Standing back and zooming in keeps the phone's shadow off the row.</p>
       </div>
     </div>
     <label class="field" style="flex:none">Lighting
@@ -145,10 +155,7 @@ tr.skip td { color: var(--muted); }
   <section class="panel" id="rowsPanel" hidden aria-label="Rows found">
     <h2>Rows found in this photo</h2>
     <div class="scroll"><table id="rowsTbl"></table></div>
-    <div class="row">
-      <button id="addAll" type="button" class="primary">Add all to list</button>
-    </div>
-    <p class="hint">Check each head name against the print; a yellow box means the name was hard to read. Tap a row to see its detail. Rows partly outside the photo are skipped.</p>
+    <p class="hint">Every complete row is added to the adjustments list by itself. A yellow name box means the name was hard to read: check it against the print. Tap a row to see its detail. Rows partly outside the photo are skipped.</p>
   </section>
 
   <section class="panel" id="resultPanel" hidden aria-label="Result">
@@ -190,16 +197,17 @@ tr.skip td { color: var(--muted); }
   <section class="panel" aria-label="Photo tips">
     <h2>Getting a reading you can trust</h2>
     <ol class="tips">
-      <li>Two rows per photo at most, filling the frame. Any way up is fine; the page turns it.</li>
+      <li>Work down the sheet from the top left, one or two rows per photo. You don't need to check each photo: every row goes into the list below, and its photo is kept on this phone for 7 days so you can check it later.</li>
+      <li>Fill the frame with the row. Any way up is fine; the page turns it.</li>
       <li>Keep each row whole, with its head name, inside the photo. Rows cut by the edge are skipped.</li>
-      <li>Hold the phone flat over the sheet, not at an angle. Do not zoom.</li>
+      <li>Hold the phone flat over the sheet, not at an angle. If your shadow falls on the row, stand back and zoom in instead of moving closer.</li>
       <li>No flash and no glare patch on the row. Tilt the sheet or move until the shine is gone.</li>
       <li>Write your marks beside the row, not on the patterns.</li>
     </ol>
   </section>
 </main>
 
-<script>
+<script id="coreSrc">
 // Nozzle alignment measurement core. Pure functions, no DOM.
 // Input: brightness image (Float32Array, darkest RGB channel per pixel), bars vertical.
 const NA = (function () {
@@ -1068,17 +1076,25 @@ const NA = (function () {
   const corners = () => [[box.x, box.y], [box.x + box.w, box.y], [box.x, box.y + box.h], [box.x + box.w, box.y + box.h]];
 
   // ---------- automatic mode
-  function runAuto() {
+  function runAuto(pre, pick) {
     mode = "auto"; rows = []; sel = -1; res = null; fitRes = null;
-    rot = 0; buildWork();
     let sc = null, err = "";
-    try { sc = NA.scan(grayOf(work, 0, 0, work.width, work.height), work.width, work.height); }
-    catch (e) { err = e.message; }
+    if (pre && pre.ok) sc = pre;
+    else {
+      rot = 0; buildWork();
+      try { const s2 = NA.scan(grayOf(work, 0, 0, work.width, work.height), work.width, work.height); sc = { rot: s2.rot, rows: s2.rows }; }
+      catch (e) { err = e.message; }
+    }
+    rot = sc && sc.rows.length ? sc.rot : 0; buildWork();
     if (sc && sc.rows.length) {
-      rot = sc.rot; buildWork();
       rows = sc.rows.map((r) => ({ y: r.y, a: r.a, labels: r.labels, fit: r.fit, box: r.box, complete: r.complete,
-        nameText: r.name ? r.name.text : "", nameSure: !!(r.name && r.name.sure), own: "" }));
-      sel = rows.findIndex((r) => r.complete);
+        nameText: r.name ? r.name.text : "", nameSure: !!(r.name && r.name.sure), own: "", entryId: r.entryId || null }));
+      if (pick) {
+        sel = rows.findIndex((r) => r.entryId && r.entryId === pick.id);
+        if (sel < 0 && pick.row) sel = rows.findIndex((r) => r.nameText === pick.row);
+        if (sel < 0 && pick.box) sel = rows.findIndex((r) => Math.abs(r.box.x - pick.box[0]) < 40 && Math.abs(r.box.y - pick.box[1]) < 40);
+      }
+      if (sel < 0) sel = rows.findIndex((r) => r.complete);
       if (sel < 0) sel = 0;
     }
     vz = 1; vx = vy = 0; clampView();
@@ -1090,6 +1106,7 @@ const NA = (function () {
     }
     $("status").hidden = true;
     renderRows(); selectRow(sel);
+    if (pick) fitRow(rows[sel]);
   }
   function selectRow(i) {
     sel = i;
@@ -1102,7 +1119,7 @@ const NA = (function () {
     const el = $("rowsTbl");
     el.textContent = "";
     const hr = el.insertRow();
-    [["Print head", "l"], ["Enter", ""], ["Reading", "l"], ["Yours", "l"], ["", ""]].forEach(([t, c]) => { const th = document.createElement("th"); th.textContent = t; th.className = c; hr.appendChild(th); });
+    [["Print head", "l"], ["Enter", ""], ["Reading", "l"], ["Yours", "l"]].forEach(([t, c]) => { const th = document.createElement("th"); th.textContent = t; th.className = c; hr.appendChild(th); });
     rows.forEach((r, i) => {
       const tr = el.insertRow();
       tr.addEventListener("click", (e) => { if (e.target.tagName !== "INPUT" && e.target.tagName !== "BUTTON") { selectRow(i); draw(); } });
@@ -1112,7 +1129,7 @@ const NA = (function () {
       inp.type = "text"; inp.id = "rowName" + i; inp.value = r.nameText; inp.placeholder = "name"; inp.autocomplete = "off";
       inp.setAttribute("autocapitalize", "characters"); inp.setAttribute("aria-label", "Print head name, row " + (i + 1));
       if (!r.nameSure) inp.className = "unsure";
-      inp.addEventListener("input", () => { r.nameText = inp.value.trim(); r.nameSure = true; inp.className = ""; draw(); });
+      inp.addEventListener("input", () => { r.nameText = inp.value.trim(); r.nameSure = true; inp.className = ""; draw(); linkEdit(r, { row: r.nameText, nameSure: true }); });
       nameTd.appendChild(inp);
       const v = tr.insertCell(); v.className = "enter"; v.textContent = r.fit.ok ? one(r.fit.zero) : "–";
       const c = confOf(r.a, r.fit, r.complete);
@@ -1124,13 +1141,10 @@ const NA = (function () {
       const oi = document.createElement("input");
       oi.type = "text"; oi.id = "rowOwn" + i; oi.placeholder = "–"; oi.style.width = "5ch"; oi.autocomplete = "off";
       oi.setAttribute("aria-label", "Your own reading, row " + (i + 1));
-      oi.addEventListener("input", () => { r.own = oi.value.trim(); });
+      const linked = r.entryId && log.find((q) => q.id === r.entryId);
+      if (linked && linked.own) oi.value = r.own = linked.own;
+      oi.addEventListener("input", () => { r.own = oi.value.trim(); linkEdit(r, { own: r.own }); });
       o.appendChild(oi);
-      const bt = tr.insertCell();
-      const b = document.createElement("button");
-      b.type = "button"; b.textContent = "Add"; b.disabled = !r.fit.ok;
-      b.addEventListener("click", () => { addEntry(r); b.textContent = "Added"; });
-      bt.appendChild(b);
     });
     $("rowsPanel").hidden = false;
   }
@@ -1254,19 +1268,19 @@ const NA = (function () {
   $("light").addEventListener("change", () => { if (!srcImg) return; if (mode === "auto") runAuto(); else { lastN = -1; measureBox(); } });
 
   // ---------- photo loading
-  function loadImage(url, sample) {
+  function loadImage(url, sample, pre, pick, note) {
     const img = new Image();
     img.onload = () => {
       srcImg = img; isSample = sample;
-      $("photoNote").textContent = sample ? "Sample photo loaded. Take or choose your own to replace it." : "Your photo, " + img.naturalWidth + " × " + img.naturalHeight + " px.";
-      runAuto();
+      $("photoNote").textContent = note || (sample ? "Sample photo loaded. Take or choose your own to replace it." : "Your photo, " + img.naturalWidth + " × " + img.naturalHeight + " px.");
+      runAuto(pre, pick);
     };
     img.onerror = () => { $("status").textContent = "That file could not be opened as a photo."; $("status").hidden = false; };
     img.src = url;
   }
   function onFile(e) {
-    const f = e.target.files && e.target.files[0];
-    if (f) loadImage(URL.createObjectURL(f), false);
+    const files = Array.from((e.target.files) || []);
+    files.forEach((f, i) => enqueue(f, { show: i === files.length - 1, source: e.target.id === "fileCam" ? "camera" : "chosen" }));
     e.target.value = "";
   }
   $("fileCam").addEventListener("change", onFile);
@@ -1371,21 +1385,53 @@ const NA = (function () {
     el.textContent = "";
     if (log.length) {
       const hr = el.insertRow();
-      [["Print head", "l"], ["Enter", ""], ["Reading", "l"], ["Yours", ""], ["", ""]].forEach(([t, c]) => { const th = document.createElement("th"); th.textContent = t; th.className = c; hr.appendChild(th); });
+      [["Print head", "l"], ["Enter", ""], ["Reading", "l"], ["Yours", "l"], ["", ""], ["", ""]].forEach(([t, c]) => { const th = document.createElement("th"); th.textContent = t; th.className = c; hr.appendChild(th); });
     }
     log.forEach((r, idx) => {
       const tr = el.insertRow();
       const cell = (t, c) => { const td = tr.insertCell(); td.textContent = t; td.className = c || ""; return td; };
-      cell(r.row || "(no name)", "l");
+      const nt = tr.insertCell(); nt.className = "l";
+      const ni = document.createElement("input");
+      ni.type = "text"; ni.id = "logName" + idx; ni.value = r.row || ""; ni.placeholder = "name"; ni.autocomplete = "off";
+      ni.setAttribute("autocapitalize", "characters"); ni.setAttribute("aria-label", "Print head name, list entry " + (idx + 1));
+      if (r.nameSure === false || !r.row) ni.className = "unsure";
+      ni.addEventListener("input", () => { r.row = ni.value.trim(); r.nameSure = true; ni.className = r.row ? "" : "unsure"; store.set("na-log", log); syncRows(r); });
+      nt.appendChild(ni);
       cell(one(r.app), "enter");
-      cell(confWord(r.conf), "l");
-      cell(r.own || "–");
+      const q = tr.insertCell(); q.className = "l";
+      const pill = document.createElement("span"); pill.className = "pill " + r.conf; pill.textContent = confWord(r.conf);
+      q.appendChild(pill);
+      const ot = tr.insertCell(); ot.className = "l";
+      const oi = document.createElement("input");
+      oi.type = "text"; oi.id = "logOwn" + idx; oi.className = "own"; oi.value = r.own || ""; oi.placeholder = "–"; oi.autocomplete = "off";
+      oi.setAttribute("aria-label", "Your own reading, list entry " + (idx + 1));
+      oi.addEventListener("input", () => { r.own = oi.value.trim(); store.set("na-log", log); });
+      ot.appendChild(oi);
+      const vb = document.createElement("button");
+      vb.type = "button"; vb.textContent = "View"; vb.disabled = !r.photoId; vb.setAttribute("aria-label", "View the photo for " + (r.row || "this entry"));
+      vb.addEventListener("click", () => viewEntry(r));
+      tr.insertCell().appendChild(vb);
       const b = document.createElement("button");
       b.type = "button"; b.textContent = "×"; b.setAttribute("aria-label", "Remove " + (r.row || "entry"));
       b.addEventListener("click", () => { log.splice(idx, 1); store.set("na-log", log); renderLog(); });
       tr.insertCell().appendChild(b);
     });
-    $("logNote").textContent = (log.length ? log.length + " in the list. " : "Nothing in the list yet. ") + NOTE;
+    const unsure = log.filter((r) => r.nameSure === false || !r.row).length;
+    $("logNote").textContent = (log.length ? log.length + " in the list" + (unsure ? ", " + unsure + " with a name to check (yellow)" : "") + ". " : "Nothing in the list yet. ") + NOTE;
+    updateSheetBar();
+  }
+  // an edit made in the photo's row table also changes the matching list entry, and the other way round
+  function linkEdit(r, patch) {
+    const e = r.entryId && log.find((q) => q.id === r.entryId);
+    if (!e) return;
+    Object.assign(e, patch); store.set("na-log", log); renderLog();
+  }
+  function syncRows(e) {
+    let hit = false;
+    rows.forEach((r, i) => { if (r.entryId && r.entryId === e.id) { r.nameText = e.row; r.nameSure = true; const inp = $("rowName" + i); if (inp) { inp.value = e.row; inp.className = ""; } hit = true; } });
+    if (hit) draw();
+    const res0 = e.photoId && results.get(e.photoId);
+    if (res0) res0.rows.forEach((r) => { if (r.entryId === e.id) r.name = { text: e.row, sure: true }; });
   }
   function entryOf(a, f, lab, name, own, complete, boxNow, nameRead) {
     return {
@@ -1397,19 +1443,6 @@ const NA = (function () {
       sample: isSample, photo: work.width + "x" + work.height, rot, box: [boxNow.x, boxNow.y, boxNow.w, boxNow.h].map(Math.round),
     };
   }
-  function addEntry(r) {
-    if (!r.fit.ok) return;
-    const e = entryOf(r.a, r.fit, r.labels, r.nameText, r.own, r.complete, r.box, r.nameRead);
-    const at = log.findIndex((q) => q.row && q.row === e.row);
-    if (at >= 0) log[at] = e; else log.push(e);
-    store.set("na-log", log); renderLog();
-  }
-  $("addAll").addEventListener("click", () => {
-    const todo = rows.filter((r) => r.complete && r.fit.ok);
-    if (!todo.length) { $("logNote").textContent = "No complete rows to add from this photo."; return; }
-    todo.forEach(addEntry);
-    $("addAll").textContent = "Added " + todo.length; setTimeout(() => { $("addAll").textContent = "Add all to list"; }, 2500);
-  });
   $("save").addEventListener("click", () => {
     if (!res || !res.ok || !fitRes || !fitRes.ok) { $("logNote").textContent = "Nothing to add yet. Get a reading first."; return; }
     log.push(entryOf(res, fitRes, labels, $("rowName").value.trim(), $("ownRead").value.trim(), true, box, ""));
@@ -1418,7 +1451,7 @@ const NA = (function () {
     renderLog();
   });
   $("copy").addEventListener("click", () => {
-    const text = "Nozzle Align adjustments\n" + log.map((r) => (r.row || "(no name)") + "\t" + one(r.app) + (r.conf === "good" ? "" : "\t(" + (r.conf === "fair" ? "fair reading" : "do not trust") + ")")).join("\n") +
+    const text = "Nozzle Align adjustments\n" + log.map((r) => (r.row || "(no name)") + "\t" + one(r.app) + (r.conf === "good" ? "" : "\t(" + (r.conf === "fair" ? "fair reading" : "do not trust") + ")") + (r.nameSure === false ? "\t(check name)" : "")).join("\n") +
       "\n\nDetail for checking\n" + log.map((r) => JSON.stringify(r)).join("\n");
     const out = $("logOut");
     out.value = text; out.hidden = false;
@@ -1429,11 +1462,164 @@ const NA = (function () {
   let clearArmed = false;
   $("clear").addEventListener("click", () => {
     if (!clearArmed) { clearArmed = true; $("clear").textContent = "Tap again to clear"; setTimeout(() => { clearArmed = false; $("clear").textContent = "Clear list"; }, 4000); return; }
-    log = []; store.set("na-log", log); clearArmed = false; $("clear").textContent = "Clear list"; $("logOut").hidden = true; renderLog();
+    log = []; store.set("na-log", log); clearArmed = false; $("clear").textContent = "Clear list"; $("logOut").hidden = true;
+    clearPhotos(); renderLog();
   });
+
+  // ---------- the sheet: every photo is queued, measured in the background, and its rows go into the list
+  const KEEP_DAYS = 7;
+  const memPhotos = new Map(), results = new Map(), queue = [];
+  let working = false, sheetPhotos = 0, sheetLast = "", shownOne = false;
+  const DB = (() => {
+    let dbp = null;
+    const open = () => (dbp = dbp || new Promise((ok, no) => {
+      const q = indexedDB.open("nozzle-align", 1);
+      q.onupgradeneeded = () => q.result.createObjectStore("photos", { keyPath: "id" });
+      q.onsuccess = () => ok(q.result); q.onerror = () => no(q.error);
+    }));
+    const tx = (m, fn) => open().then((db) => new Promise((ok, no) => {
+      const t = db.transaction("photos", m), r = fn(t.objectStore("photos"));
+      t.oncomplete = () => ok(r && r.result); t.onerror = () => no(t.error); t.onabort = () => no(t.error);
+    }));
+    return {
+      put: (rec) => tx("readwrite", (st) => st.put(rec)), get: (id) => tx("readonly", (st) => st.get(id)),
+      del: (id) => tx("readwrite", (st) => st.delete(id)), keys: () => tx("readonly", (st) => st.getAllKeys()), clear: () => tx("readwrite", (st) => st.clear()),
+    };
+  })();
+  const newId = () => Date.now().toString(36) + "-" + Math.random().toString(36).slice(2, 7);
+  const idTime = (id) => parseInt(String(id).split("-")[0], 36) || 0;
+  async function tidyPhotos() {
+    try {
+      const keys = await DB.keys(), cutoff = Date.now() - KEEP_DAYS * 864e5;
+      for (const k of keys) if (idTime(k) < cutoff) await DB.del(k);
+      sheetPhotos = keys.filter((k) => idTime(k) >= cutoff).length;
+    } catch (e) { sheetPhotos = memPhotos.size; }
+    updateSheetBar();
+  }
+  function clearPhotos() {
+    memPhotos.clear(); results.clear(); queue.length = 0; sheetPhotos = 0; sheetLast = ""; liveCaptured.clear(); lastCapBoxes = null;
+    DB.clear().catch(() => {});
+  }
+  function updateSheetBar() {
+    const bar = $("sheetBar");
+    const waiting = queue.length + (working ? 1 : 0);
+    if (!sheetPhotos && !waiting) { bar.hidden = true; return; }
+    bar.hidden = false;
+    $("sheetCount").textContent = "This sheet: " + sheetPhotos + " photo" + (sheetPhotos === 1 ? "" : "s") + ", " + log.length + " row" + (log.length === 1 ? "" : "s") + " in the list" + (waiting ? " · measuring " + waiting + "…" : "");
+    $("sheetLast").textContent = sheetLast;
+  }
+  // the measuring runs in a background worker so the camera stays smooth
+  const WORKER_GLUE = "self.onmessage=function(e){var d=e.data;try{var sc=NA.scan(d.g,d.w,d.h);self.postMessage({id:d.id,ok:true,rot:sc.rot,rows:sc.rows.map(function(r){return{y:r.y,a:r.a,labels:r.labels,fit:r.fit,box:r.box,complete:r.complete,name:r.name}})})}catch(err){self.postMessage({id:d.id,ok:false,error:String(err&&err.message||err)})}};";
+  let worker = null, wseq = 0;
+  const wpend = new Map();
+  function getWorker() {
+    if (worker !== null) return worker;
+    try {
+      worker = new Worker(URL.createObjectURL(new Blob([$("coreSrc").textContent + "\n" + WORKER_GLUE], { type: "text/javascript" })));
+      worker.onmessage = (e) => { const p = wpend.get(e.data.id); if (p) { wpend.delete(e.data.id); p(e.data); } };
+      worker.onerror = () => { worker = false; wpend.forEach((p) => p({ ok: false, error: "worker" })); wpend.clear(); };
+    } catch (e) { worker = false; }
+    return worker;
+  }
+  function scanHere(g, w, h) {
+    try { const sc = NA.scan(g, w, h); return { ok: true, rot: sc.rot, rows: sc.rows.map((r) => ({ y: r.y, a: r.a, labels: r.labels, fit: r.fit, box: r.box, complete: r.complete, name: r.name })) }; }
+    catch (e) { return { ok: false, error: e.message }; }
+  }
+  function scanAsync(g, w, h) {
+    const wk = getWorker();
+    if (!wk) return new Promise((ok) => setTimeout(() => ok(scanHere(g, w, h)), 0));
+    const copy = new Float32Array(g);
+    return new Promise((ok) => { const id = ++wseq; wpend.set(id, ok); wk.postMessage({ id, g: copy, w, h }, [copy.buffer]); })
+      .then((r) => (!r.ok && r.error === "worker" ? scanHere(g, w, h) : r));
+  }
+  function decodeBlob(blob) {
+    return new Promise((ok, no) => { const u = URL.createObjectURL(blob), img = new Image(); img.onload = () => ok(img); img.onerror = () => no(new Error("That file could not be opened as a photo.")); img.src = u; });
+  }
+  function grayOfImage(img) {
+    const sw = img.naturalWidth, sh = img.naturalHeight, k = Math.min(1, 4096 / Math.max(sw, sh, 1));
+    const c = document.createElement("canvas");
+    c.width = Math.round(sw * k); c.height = Math.round(sh * k);
+    c.getContext("2d", { willReadFrequently: true }).drawImage(img, 0, 0, c.width, c.height);
+    return { g: grayOf(c, 0, 0, c.width, c.height), w: c.width, h: c.height };
+  }
+  function enqueue(blob, opts) {
+    const id = newId();
+    memPhotos.set(id, blob);
+    DB.put({ id, blob }).catch(() => {});
+    sheetPhotos++;
+    queue.push({ id, blob, opts: opts || {} });
+    updateSheetBar(); pump();
+    return id;
+  }
+  const RANK = { good: 2, fair: 1, poor: 0 };
+  function entryFromRow(r, photoId, i, dims, rotN) {
+    const f = r.fit, a = r.a, name = (r.name && r.name.text) || "";
+    return {
+      id: photoId + "#" + i, photoId, t: new Date().toISOString(), row: name, nameSure: !!(r.name && r.name.sure && name), nameRead: name, own: "",
+      app: +f.zero.toFixed(3), se: +f.se.toFixed(3), conf: confOf(a, f, true), scatter: +f.scatterSteps.toFixed(3),
+      blockZero: +f.blockZero.toFixed(3), gapZero: isFinite(f.gapZero) ? +f.gapZero.toFixed(3) : null,
+      light: $("light").value, mode: "sheet", pxPerStep: +f.slope.toFixed(3), pitch: +a.pitch.toFixed(1), tilt: +a.tiltDeg.toFixed(3), blur: +a.blur.toFixed(3),
+      labels: r.labels.slice(), shifts: a.blocks.map((b) => (isFinite(b.shiftPx) ? +b.shiftPx.toFixed(2) : null)),
+      seams: a.blocks.map((b) => (isFinite(b.seam) ? +b.seam.toFixed(1) : null)), rejected: f.rejected.slice(),
+      sample: false, photo: dims, rot: rotN, box: [r.box.x, r.box.y, r.box.w, r.box.h].map(Math.round),
+    };
+  }
+  // the same row can turn up in two neighbouring photos: keep the better reading of it
+  function ingest(job, r, dims) {
+    const got = [];
+    let cut = 0;
+    r.rows.forEach((row, i) => {
+      if (!row.complete) { cut++; return; }
+      if (!row.fit || !row.fit.ok) return;
+      const e = entryFromRow(row, job.id, i, dims, r.rot);
+      row.entryId = e.id;
+      const at = e.row ? log.findIndex((q) => q.row === e.row || (q.nameRead && q.nameRead === e.row)) : -1;
+      if (at >= 0) {
+        const old = log[at];
+        const better = (RANK[e.conf] - RANK[old.conf]) || ((old.scatter || 9) - e.scatter);
+        if (better > 0) { e.own = old.own || ""; e.seen = (old.seen || 1) + 1; if (old.nameSure !== false && old.row) { e.row = old.row; e.nameSure = true; } log[at] = e; }
+        else { old.seen = (old.seen || 1) + 1; row.entryId = old.id; }
+      } else log.push(e);
+      got.push((e.row || "?") + " " + one(e.app));
+    });
+    store.set("na-log", log);
+    return { got, cut };
+  }
+  async function pump() {
+    if (working) return;
+    const job = queue.shift();
+    if (!job) { updateSheetBar(); return; }
+    working = true; updateSheetBar();
+    let summary = "";
+    try {
+      const img = await decodeBlob(job.blob);
+      const { g, w, h } = grayOfImage(img);
+      const r = await scanAsync(g, w, h);
+      if (!r.ok) throw new Error(r.error);
+      results.set(job.id, r);
+      const { got, cut } = ingest(job, r, w + "x" + h);
+      summary = "Photo " + sheetPhotos + ": " + (got.length ? got.join(", ") : "no complete rows found") + (cut ? " (" + cut + " cut off)" : "");
+      if (job.opts.show) { shownOne = true; loadImage(img.src, false, r, null, "Your photo, " + img.naturalWidth + " × " + img.naturalHeight + " px."); }
+    } catch (e) {
+      summary = "A photo could not be measured: " + e.message;
+    }
+    sheetLast = summary;
+    working = false;
+    renderLog();
+    pump();
+  }
+  async function viewEntry(e) {
+    let blob = memPhotos.get(e.photoId);
+    if (!blob) { try { const rec = await DB.get(e.photoId); blob = rec && rec.blob; } catch (err) { blob = null; } }
+    if (!blob) { $("logNote").textContent = "The photo for " + (e.row || "this entry") + " is no longer stored (photos are kept for " + KEEP_DAYS + " days)."; return; }
+    loadImage(URL.createObjectURL(blob), false, results.get(e.photoId), e, "Photo for " + (e.row || "this entry") + ", taken " + new Date(idTime(e.photoId)).toLocaleString() + ".");
+    $("viewWrap").scrollIntoView({ block: "center", behavior: "smooth" });
+  }
 
   // ---------- auto capture from the live camera
   let stream = null, liveTimer = null, rafId = 0, steady = 0, lastBoxes = "", liveRows = [], liveDim = null, camIds = [], camAt = 0, busy = false;
+  const liveCaptured = new Set();
+  let lastCapBoxes = null, liveShots = 0;
   const small = document.createElement("canvas"), lv = $("liveView"), lctx = lv.getContext("2d");
   const STEADY_NEEDED = 2;
   function stopLive() {
@@ -1466,7 +1652,7 @@ const NA = (function () {
     const k = W / liveDim.w;
     for (const r of liveRows) {
       lctx.lineWidth = 3 * dpr;
-      lctx.strokeStyle = r.state === "ok" ? "#2fd27a" : r.state === "cut" ? "rgba(200,200,200,0.95)" : "#ffb020";
+      lctx.strokeStyle = r.state === "ok" ? "#2fd27a" : r.state === "done" ? "#4fa8ff" : r.state === "cut" ? "rgba(200,200,200,0.95)" : "#ffb020";
       if (r.state === "cut") lctx.setLineDash([6 * dpr, 5 * dpr]);
       lctx.strokeRect(r.b.x * k, r.b.y * k, r.b.w * k, r.b.h * k); lctx.setLineDash([]);
       if (r.label) {
@@ -1480,19 +1666,29 @@ const NA = (function () {
   async function snap() {
     if (busy || !stream) return;
     busy = true;
-    if (liveTimer) { clearInterval(liveTimer); liveTimer = null; }
-    $("liveMsg").textContent = "Captured. Measuring…";
     const track = stream.getVideoTracks()[0];
-    let url = null;
-    try { if (window.ImageCapture) url = URL.createObjectURL(await new ImageCapture(track).takePhoto()); } catch (e) { url = null; }
-    if (!url) {
+    let blob = null;
+    try { if (window.ImageCapture) blob = await new ImageCapture(track).takePhoto(); } catch (e) { blob = null; }
+    if (!blob) {
       const v = $("video"), c = document.createElement("canvas");
       c.width = v.videoWidth; c.height = v.videoHeight;
       c.getContext("2d").drawImage(v, 0, 0);
-      url = c.toDataURL("image/jpeg", 0.95);
+      blob = await new Promise((ok) => c.toBlob(ok, "image/jpeg", 0.95));
     }
-    stopLive(); busy = false;
-    loadImage(url, false);
+    const ok = liveRows.filter((r) => r.state === "ok");
+    ok.forEach((r) => { if (r.name) liveCaptured.add(r.name); });
+    lastCapBoxes = ok.map((r) => r.b);
+    liveShots++;
+    if (blob) enqueue(blob, { show: false, source: "live" });
+    try { if (navigator.vibrate) navigator.vibrate(90); } catch (e) {}
+    const names = ok.map((r) => r.name).filter(Boolean);
+    $("liveMsg").textContent = "Got it" + (names.length ? " (" + names.join(", ") + ")" : "") + ". Move to the next row.";
+    steady = 0; lastBoxes = ""; busy = false;
+  }
+  function sameSpot(a, b) {
+    if (!a || !b || !b.length || !liveDim) return false;
+    const tol = 0.08 * Math.max(liveDim.w, liveDim.h);
+    return a.every((p) => b.some((q) => Math.abs(p.x + p.w / 2 - (q.x + q.w / 2)) < tol && Math.abs(p.y + p.h / 2 - (q.y + q.h / 2)) < tol));
   }
   function liveTick() {
     const v = $("video"), msg = $("liveMsg");
@@ -1504,19 +1700,28 @@ const NA = (function () {
     try { sc = NA.scan(grayOf(small, 0, 0, small.width, small.height), small.width, small.height); } catch (e) { sc = null; }
     liveDim = { w: small.width, h: small.height };
     const long = Math.max(small.width, small.height);
+    const have = new Set(liveCaptured);
+    log.forEach((e) => { if (e.row && e.nameSure !== false) have.add(e.row); });
     liveRows = (sc ? sc.rows : []).map((r) => {
       const st = !r.complete ? "cut" : r.box.w < 0.55 * long ? "small" : r.a.blur > 0.4 ? "blur" : "ok";
-      return { b: unturn(r.box, sc.rot, small.width, small.height), state: st,
-        label: st === "cut" ? "cut off" : st === "small" ? "too small" : st === "blur" ? "blurred" : (r.name && r.name.text) || "ready" };
+      const name = (r.name && r.name.text) || "", sure = !!(r.name && r.name.sure && name);
+      const done = st === "ok" && name && (liveCaptured.has(name) || (sure && have.has(name)));
+      return { b: unturn(r.box, sc.rot, small.width, small.height), state: done ? "done" : st, name, sure,
+        label: st === "cut" ? "cut off" : st === "small" ? "too small" : st === "blur" ? "blurred" : done ? name + " ✓ got" : name || "ready" };
     });
     const full = liveRows.filter((r) => r.state !== "cut"), ok = liveRows.filter((r) => r.state === "ok");
-    const reset = (t) => { steady = 0; lastBoxes = ""; msg.textContent = t; };
+    const reset = (t) => { steady = 0; lastBoxes = ""; msg.textContent = (liveShots ? liveShots + " taken. " : "") + t; };
     if (!liveRows.length) return reset("No chart found yet. Point the camera at one or two rows.");
     if (!full.length) return reset("The row is cut off. Fit the whole row and its head name inside the dashed frame.");
-    if (!ok.length) return reset(full.some((r) => r.state === "small") ? "Too small. Move closer or zoom in until a row nearly fills the frame." : "Blurred. Hold still, or move back a little.");
+    if (!ok.length) {
+      if (liveRows.some((r) => r.state === "done")) return reset("Already got " + liveRows.filter((r) => r.state === "done").map((r) => r.name).join(", ") + ". Move to the next row.");
+      return reset(full.some((r) => r.state === "small") ? "Too small. Move closer or zoom in until a row nearly fills the frame." : "Blurred. Hold still, or move back a little.");
+    }
+    // rows whose names could not be read: only take them once the camera has moved since the last photo
+    if (ok.every((r) => !r.sure) && sameSpot(ok.map((r) => r.b), lastCapBoxes)) return reset("Got it. Move to the next row.");
     const sig = ok.map((r) => Math.round(r.b.x / 14) + "," + Math.round(r.b.y / 14)).join(";");
     steady = sig === lastBoxes ? steady + 1 : 0; lastBoxes = sig;
-    if (steady < STEADY_NEEDED) { msg.textContent = "Ready (" + ok.length + " row" + (ok.length > 1 ? "s" : "") + "). Hold still… " + "●".repeat(steady + 1) + "○".repeat(STEADY_NEEDED - steady); return; }
+    if (steady < STEADY_NEEDED) { msg.textContent = (liveShots ? liveShots + " taken. " : "") + "New row" + (ok.length > 1 ? "s" : "") + " found. Hold still… " + "●".repeat(steady + 1) + "○".repeat(STEADY_NEEDED - steady); return; }
     snap();
   }
   function setupControls() {
@@ -1579,15 +1784,15 @@ const NA = (function () {
       return;
     }
     $("liveControls").hidden = false;
-    msg.textContent = "No chart found yet. Point the camera at one or two rows."; steady = 0; lastBoxes = ""; liveRows = []; busy = false;
+    msg.textContent = "No chart found yet. Start at the top-left row of the sheet."; steady = 0; lastBoxes = ""; liveRows = []; busy = false; liveShots = 0;
     liveTimer = setInterval(liveTick, 600);
     if (!rafId) paintLive();
     $("livePanel").scrollIntoView({ block: "start", behavior: "smooth" });
   });
-  $("liveStop").addEventListener("click", stopLive);
+  $("liveStop").addEventListener("click", () => { stopLive(); $("logPanel").scrollIntoView({ block: "start", behavior: "smooth" }); });
   $("liveSnap").addEventListener("click", snap);
 
-  renderLog(); setModeUi();
+  renderLog(); setModeUi(); tidyPhotos();
   loadImage(SAMPLE, true);
 })();
 </script>
